@@ -1,7 +1,11 @@
 # node-safebrowsing
 Node client for Google's Safe Browsing Update API v4.
 
-# Usage
+Based on @hellojwilde/[node-safebrowsing](https://github.com/hellojwilde/node-safebrowsing) (url canonicalization and lookup expressions generation).
+
+Currently only works with Redis as a caching mechanism and local database storage.
+
+## Usage
 ```
 const safeBrowsing = require('node-safebrowsing')({
   API_KEY: "YOUR_API_KEY_HERE",
@@ -30,3 +34,6 @@ safeBrowsing.check("http://google.com").then((results) => {
 
 safeBrowsing.stop(); // quit redis and stop update timeout cycle
 ```
+
+## Contribution
+Feel free to submit issues and create pull requests.
