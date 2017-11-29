@@ -23,6 +23,8 @@ const safeBrowsing = require('node-safebrowsing')({
   }]
 });
 
+safeBrowsing.start(); // optionally start update lifecycle
+
 safeBrowsing.check("http://google.com").then((results) => {
   if (results.length) {
     // url appears in one or more lists 

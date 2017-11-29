@@ -14,35 +14,32 @@ module.exports = function(config) {
 
     let updateTimeout;
 
-    const initPromise = new Promise((resolve) => {
-        client.get("safebrowse:nextupdate", (err, nextUpdate) => {
-            if (err) throw err;
-            let wait = nextUpdate && moment(+nextUpdate).diff() || 0;
-            if (wait > 0) {
-                console.log("next update in %d seconds", wait / 1000);
-                resolve();
-            }
-            updateTimeout = setTimeout(() => {
-                update().then(() => {
-                    if (wait <= 0) {
-                        resolve();
-                    }
-                });
-            }, wait);
-        });
-    });
+    function getMinimumWaitDuration() {
+        return new Promise((resolve) => {
+            client.get("safebrowse:nextupdate", (err, nextUpdate) => {
+                if(err) throw err;
+                resolve(nextUpdate ? moment(+nextUpdate).diff() : 0);
+            });
+        })
+    }
 
-    async function update() {
-        console.log("getting updates");
-        let updates = await getThreatListUpdates();
-        let minimumWaitDuration = Math.ceil(parseFloat(updates['minimumWaitDuration'])) || 300;
-        let nextUpdate = +moment().add(minimumWaitDuration, 'seconds').toDate();
-        console.log("applying updates");
-        await handleUpdates(updates);
-        console.log("next update in %d seconds", minimumWaitDuration);
-        client.set("safebrowse:nextupdate", nextUpdate, (err) => {
-            if (err) throw err;
-            updateTimeout = setTimeout(update, minimumWaitDuration*1000);
+    function update(once) {
+        return new Promise(async (resolve) => {
+            let timeout = await getMinimumWaitDuration();
+            timeout > 0 && console.log("next update in %d seconds", timeout/1000);
+            updateTimeout = setTimeout(async () => {
+                console.log("getting updates");
+                let updates = await getThreatListUpdates();
+                let minimumWaitDuration = Math.ceil(parseFloat(updates['minimumWaitDuration'])) || 300;
+                let nextUpdate = +moment().add(minimumWaitDuration, 'seconds').toDate();
+                console.log("applying updates");
+                await handleUpdates(updates);
+                client.set("safebrowse:nextupdate", nextUpdate, (err) => {
+                    if (err) throw err;
+                    !once && update();
+                    resolve();
+                });
+            }, timeout);
         });
     }
 
@@ -168,7 +165,22 @@ module.exports = function(config) {
 
     }
 
+    const initPromise = new Promise(async (resolve) => {
+        let wait = await getMinimumWaitDuration();
+        if (wait > 0) {
+            resolve();
+        }
+        else {
+            update(true).then(resolve);
+        }
+    });
+
     return {
+        start: () => {
+            initPromise.then(() => {
+                update();
+            });
+        },
         check: (url) => {
             return initPromise.then(() => {
                 return check(url);
