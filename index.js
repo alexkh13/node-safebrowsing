@@ -18,14 +18,14 @@ module.exports = function(config) {
         return new Promise((resolve) => {
             client.get("safebrowse:nextupdate", (err, nextUpdate) => {
                 if(err) throw err;
-                resolve(nextUpdate ? moment(+nextUpdate).diff() : 0);
+                resolve(nextUpdate ? moment(+nextUpdate).diff() : null);
             });
         })
     }
 
-    function update(once) {
+    function update() {
         return new Promise(async (resolve) => {
-            let timeout = await getMinimumWaitDuration();
+            let timeout = await getMinimumWaitDuration() || 0;
             timeout > 0 && console.log("next update in %d seconds", timeout/1000);
             updateTimeout = setTimeout(async () => {
                 console.log("getting updates");
@@ -36,7 +36,7 @@ module.exports = function(config) {
                 await handleUpdates(updates);
                 client.set("safebrowse:nextupdate", nextUpdate, (err) => {
                     if (err) throw err;
-                    !once && update();
+                    update();
                     resolve();
                 });
             }, timeout);
@@ -165,26 +165,19 @@ module.exports = function(config) {
 
     }
 
-    const initPromise = new Promise(async (resolve) => {
-        let wait = await getMinimumWaitDuration();
-        if (wait > 0) {
-            resolve();
-        }
-        else {
-            update(true).then(resolve);
-        }
-    });
+    let initPromise;
 
     return {
         start: () => {
-            initPromise.then(() => {
-                update();
-            });
+            initPromise = update();
         },
-        check: (url) => {
-            return initPromise.then(() => {
-                return check(url);
-            });
+        check: async (url) => {
+            await initPromise;
+            let wait = await getMinimumWaitDuration();
+            if (wait === null) {
+                throw new Error("db not initialized");
+            }
+            return check(url);
         },
         stop: () => {
             clearTimeout(updateTimeout);

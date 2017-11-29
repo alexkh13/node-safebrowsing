@@ -23,8 +23,11 @@ const safeBrowsing = require('node-safebrowsing')({
   }]
 });
 
-safeBrowsing.start(); // optionally start update lifecycle
+// before you run checks for the first time
+// you have to start the update lifecycle
+safeBrowsing.start();
 
+// you can then immediately run a check without waiting for the update to complete
 safeBrowsing.check("http://google.com").then((results) => {
   if (results.length) {
     // url appears in one or more lists 
