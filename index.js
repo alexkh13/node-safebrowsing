@@ -26,14 +26,16 @@ module.exports = function(config) {
     function update() {
         return new Promise(async (resolve) => {
             let timeout = await getMinimumWaitDuration() || 0;
-            timeout > 0 && console.log("next update in %d seconds", timeout/1000);
+            timeout > 0 && notifyListeners("update:scheduled", {
+                nextUpdate: timeout/1000
+            });
             updateTimeout = setTimeout(async () => {
-                console.log("getting updates");
+                notifyListeners("update:started");
                 let updates = await getThreatListUpdates();
                 let minimumWaitDuration = Math.ceil(parseFloat(updates['minimumWaitDuration'])) || 300;
                 let nextUpdate = +moment().add(minimumWaitDuration, 'seconds').toDate();
-                console.log("applying updates");
                 await handleUpdates(updates);
+                notifyListeners("update:complete");
                 client.set("safebrowse:nextupdate", nextUpdate, (err) => {
                     if (err) throw err;
                     update();
@@ -165,7 +167,12 @@ module.exports = function(config) {
 
     }
 
+    function notifyListeners(eventType, ...args) {
+        _.each(listeners[eventType], (cb) => cb.apply(this, args));
+    }
+
     let initPromise;
+    let listeners = {};
 
     return {
         start: () => {
@@ -182,6 +189,10 @@ module.exports = function(config) {
         stop: () => {
             clearTimeout(updateTimeout);
             client.quit();
+        },
+        on: (eventType, cb) => {
+            if (!listeners[eventType]) listeners[eventType] = [];
+            listeners[eventType].push(cb);
         }
     }
 };
