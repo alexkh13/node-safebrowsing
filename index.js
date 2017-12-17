@@ -1,6 +1,5 @@
 const redis = require('redis');
 const moment = require('moment');
-const client = redis.createClient();
 const google = require('googleapis');
 const safebrowsing = google.safebrowsing('v4');
 const Hashes = require('./util/Hashes');
@@ -8,7 +7,9 @@ const _ = require('underscore');
 const getCanonicalizedURL = require('./util/getCanonicalizedURL');
 const getLookupExpressions = require('./util/getLookupExpressions');
 
-module.exports = function(config) {
+module.exports = function(config, options={}) {
+
+    const client = redis.createClient(options.redis);
 
     const Lists = config.Lists || DefaultLists;
 
@@ -167,6 +168,122 @@ module.exports = function(config) {
 
     }
 
+
+
+    function getListItem(list, index) {
+        return new Promise((resolve) => {
+            client.lindex(list, index, (err, item) => {
+                if (err) throw err;
+                resolve(item);
+            })
+        })
+    }
+
+    async function handleUpdates(updates) {
+
+        for(let listUpdateResponse of updates['listUpdateResponses']) {
+
+            let batch = client.batch();
+
+            let key = getListKey(
+                listUpdateResponse.threatType,
+                listUpdateResponse.platformType,
+                listUpdateResponse.threatEntryType);
+
+            let prefixesSetKey = key + ":prefixes:set";
+            let prefixesListKey = key + ":prefixes:list";
+
+            if (listUpdateResponse.responseType === 'FULL_UPDATE') {
+                batch.del(prefixesSetKey);
+                batch.del(prefixesListKey);
+            }
+
+            batch.set(key + ":state", listUpdateResponse.newClientState);
+
+            await Promise.all(_.map(listUpdateResponse.removals, async (removal) => {
+                let {indices} = removal.rawIndices;
+                indices = indices.reverse();
+                await Promise.all(_.map(indices, async (index) => {
+                    batch.lset(prefixesListKey, index, 'DELETED');
+                    batch.lrem(prefixesListKey, 1, 'DELETED');
+                    let prefix = await getListItem(prefixesListKey, index);
+                    batch.srem(prefixesSetKey, prefix);
+                }));
+            }));
+
+            _.each(listUpdateResponse.additions, (addition) => {
+                let {rawHashes,prefixSize} = addition.rawHashes;
+                let buff = Buffer.from(rawHashes, 'base64');
+                for(let i=0;i<buff.length; i+=prefixSize) {
+                    let prefix = buff.slice(i, i+prefixSize).toString('base64');
+                    batch.sadd(prefixesSetKey, prefix);
+                    batch.lpush(prefixesListKey, prefix);
+                }
+            });
+
+            await new Promise((resolve) => {
+                batch.exec((err) => {
+                    if (err) throw err;
+                    resolve();
+                });
+            })
+        }
+    }
+
+    function getPrefixesLists() {
+        return new Promise((resolve) => {
+            return client.keys("safebrowse:*:prefixes:set", (err, lists) => {
+                if (err) throw err;
+                resolve(lists);
+            });
+        });
+    }
+
+    function getListState(code) {
+        return new Promise((resolve) => {
+            return client.get("safebrowse:" + code + ":state", (err, state) => {
+                if (err) throw err;
+                resolve(state);
+            });
+        });
+    }
+
+    function prefixExists(list, prefix) {
+        return new Promise((resolve) => {
+            client.sismember(list, prefix, (err, reply) => {
+                if (err) throw err;
+                resolve(!!reply);
+            });
+        })
+    }
+
+    function cacheMatch(match) {
+        let list = getListKey(match.threatType, match.platformType, match.threatEntryType);
+        let hash = match.threat.hash;
+        let timeout = parseInt(match.cacheDuration);
+        let key = list + ":hash:" + hash;
+        return new Promise((resolve) => {
+            client.set(key, JSON.stringify(match), (err) => {
+                if (err) throw err;
+                client.expire(key, timeout, (err) => {
+                    if (err) throw err;
+                    resolve();
+                });
+            });
+        })
+    }
+
+    function getCachedMatch(partialMatch) {
+        let list = getListKey(partialMatch.threatType, partialMatch.platformType, partialMatch.threatEntryType);
+        let hash = partialMatch.hash.toString('base64');
+        return new Promise((resolve) => {
+            client.get(list + ":hash:" + hash, (err, reply) => {
+                if (err) throw err;
+                resolve(JSON.parse(reply));
+            });
+        })
+    }
+
     function notifyListeners(eventType, ...args) {
         _.each(listeners[eventType], (cb) => cb.apply(this, args));
     }
@@ -273,118 +390,4 @@ function getListCode(list) {
 
 function getListKey(threatType, platformType, threatEntryType) {
     return "safebrowse:" + getListCode({threatType, platformType, threatEntryType});
-}
-
-function getListItem(list, index) {
-    return new Promise((resolve) => {
-        client.lindex(list, index, (err, item) => {
-            if (err) throw err;
-            resolve(item);
-        })
-    })
-}
-
-async function handleUpdates(updates) {
-
-    for(let listUpdateResponse of updates['listUpdateResponses']) {
-
-        let batch = client.batch();
-
-        let key = getListKey(
-            listUpdateResponse.threatType,
-            listUpdateResponse.platformType,
-            listUpdateResponse.threatEntryType);
-
-        let prefixesSetKey = key + ":prefixes:set";
-        let prefixesListKey = key + ":prefixes:list";
-
-        if (listUpdateResponse.responseType === 'FULL_UPDATE') {
-            batch.del(prefixesSetKey);
-            batch.del(prefixesListKey);
-        }
-
-        batch.set(key + ":state", listUpdateResponse.newClientState);
-
-        await Promise.all(_.map(listUpdateResponse.removals, async (removal) => {
-            let {indices} = removal.rawIndices;
-            indices = indices.reverse();
-            await Promise.all(_.map(indices, async (index) => {
-                batch.lset(prefixesListKey, index, 'DELETED');
-                batch.lrem(prefixesListKey, 1, 'DELETED');
-                let prefix = await getListItem(prefixesListKey, index);
-                batch.srem(prefixesSetKey, prefix);
-            }));
-        }));
-
-        _.each(listUpdateResponse.additions, (addition) => {
-            let {rawHashes,prefixSize} = addition.rawHashes;
-            let buff = Buffer.from(rawHashes, 'base64');
-            for(let i=0;i<buff.length; i+=prefixSize) {
-                let prefix = buff.slice(i, i+prefixSize).toString('base64');
-                batch.sadd(prefixesSetKey, prefix);
-                batch.lpush(prefixesListKey, prefix);
-            }
-        });
-
-        await new Promise((resolve) => {
-            batch.exec((err) => {
-                if (err) throw err;
-                resolve();
-            });
-        })
-    }
-}
-
-function getPrefixesLists() {
-    return new Promise((resolve) => {
-        return client.keys("safebrowse:*:prefixes:set", (err, lists) => {
-            if (err) throw err;
-            resolve(lists);
-        });
-    });
-}
-
-function getListState(code) {
-    return new Promise((resolve) => {
-        return client.get("safebrowse:" + code + ":state", (err, state) => {
-            if (err) throw err;
-            resolve(state);
-        });
-    });
-}
-
-function prefixExists(list, prefix) {
-    return new Promise((resolve) => {
-        client.sismember(list, prefix, (err, reply) => {
-            if (err) throw err;
-            resolve(!!reply);
-        });
-    })
-}
-
-function cacheMatch(match) {
-    let list = getListKey(match.threatType, match.platformType, match.threatEntryType);
-    let hash = match.threat.hash;
-    let timeout = parseInt(match.cacheDuration);
-    let key = list + ":hash:" + hash;
-    return new Promise((resolve) => {
-        client.set(key, JSON.stringify(match), (err) => {
-            if (err) throw err;
-            client.expire(key, timeout, (err) => {
-                if (err) throw err;
-                resolve();
-            });
-        });
-    })
-}
-
-function getCachedMatch(partialMatch) {
-    let list = getListKey(partialMatch.threatType, partialMatch.platformType, partialMatch.threatEntryType);
-    let hash = partialMatch.hash.toString('base64');
-    return new Promise((resolve) => {
-        client.get(list + ":hash:" + hash, (err, reply) => {
-            if (err) throw err;
-            resolve(JSON.parse(reply));
-        });
-    })
 }
